@@ -22,6 +22,18 @@ from matplotlib import cm
 
 warnings.filterwarnings('ignore')
 
+# RF Classification module
+try:
+    from rf_analysis import (
+        load_rf_model,
+        perform_rf_classification_on_tracks,
+        export_rf_visualizations,
+        export_rf_analysis
+    )
+    RF_AVAILABLE = True
+except ImportError:
+    RF_AVAILABLE = False
+
 # Core: I/O + preprocessing
 def calculate_snr(df: pd.DataFrame) -> pd.Series:
     if not {'intensity [photon]', 'offset [photon]', 'bkgstd [photon]'}.issubset(df.columns):
@@ -318,17 +330,22 @@ def scan_parameters_and_select(df_track: pd.DataFrame, min_track_length: int, pr
 
 
 # Output helpers: folders, plotting, excel
-def create_output_structure(base_path: str | Path) -> dict[str, Path]:
+def create_output_structure(base_path: str | Path, include_rf: bool = False) -> dict[str, Path]:
     base_path = Path(base_path)
     folders = {
         'main': base_path / '3D_Tracking_Results',
         'raw': base_path / '3D_Tracking_Results' / '01_Raw_Tracks',
         'time': base_path / '3D_Tracking_Results' / '02_Time_Resolved_Tracks',
         'snr': base_path / '3D_Tracking_Results' / '03_SNR_Tracks',
+        'excel': base_path / '3D_Tracking_Results' / '04_Tracks',
         'hist': base_path / '3D_Tracking_Results' / '05_Histogramm',
         'interactive': base_path / '3D_Tracking_Results' / '06_Interactive',
-        'excel': base_path / '3D_Tracking_Results' / '04_Tracks',
     }
+
+    if include_rf:
+        folders['rf_class'] = base_path / '3D_Tracking_Results' / '07_RF_Model_Classification'
+        folders['rf_analysis'] = base_path / '3D_Tracking_Results' / '08_RF_Analysis'
+
     for folder in folders.values():
         folder.mkdir(parents=True, exist_ok=True)
     return folders
@@ -557,6 +574,97 @@ def export_interactive_tracks(tracks: pd.DataFrame, folder: Path, n_longest: int
             progress_callback(f"Interactive-Export-Fehler: {e}")
 
 
+def export_rf_classification_workflow(tracks: pd.DataFrame, base_dir: Path, n_tracks_to_plot='all',
+                                      integration_time_ms: float = 100, progress_callback=None):
+    """
+    Perform full RF classification workflow: classify, visualize, and export analysis.
+
+    Args:
+        tracks: Tracked particles DataFrame
+        base_dir: Base directory for output
+        n_tracks_to_plot: Number of tracks to plot or 'all'
+        integration_time_ms: Integration time in ms
+        progress_callback: Optional progress callback
+    """
+    if not RF_AVAILABLE:
+        if progress_callback:
+            progress_callback("RF module not available - skipping RF classification")
+        return
+
+    try:
+        # Load RF model
+        if progress_callback:
+            progress_callback("=" * 70)
+            progress_callback("STARTING RF CLASSIFICATION")
+
+        model, scaler, metadata = load_rf_model(Path.cwd())
+
+        if model is None:
+            if progress_callback:
+                progress_callback("RF model not found - skipping RF classification")
+                progress_callback("Expected files: rf_diffusion_classifier_*.pkl, feature_scaler_*.pkl, model_metadata_*.json")
+            return
+
+        if progress_callback:
+            progress_callback("RF model loaded successfully")
+
+        # Label names
+        label_names = {
+            0: 'Normal Diffusion',
+            1: 'Subdiffusion (fBm)',
+            2: 'Confined Diffusion',
+            3: 'Superdiffusion'
+        }
+
+        # Classify all tracks
+        dt = integration_time_ms / 1000.0  # Convert to seconds
+
+        tracks_classified = perform_rf_classification_on_tracks(
+            tracks=tracks,
+            model=model,
+            scaler=scaler,
+            metadata=metadata,
+            window_sizes=[10, 20, 30, 40, 50, 100, 150, 200],
+            overlap=0.75,
+            min_seg_length=10,
+            dt=dt,
+            progress_callback=progress_callback
+        )
+
+        # Create output structure
+        folders = create_output_structure(base_dir, include_rf=True)
+
+        # Export visualizations
+        export_rf_visualizations(
+            tracks_classified=tracks_classified,
+            output_dir=folders['main'],
+            label_names=label_names,
+            n_tracks_to_plot=n_tracks_to_plot,
+            progress_callback=progress_callback
+        )
+
+        # Export analysis
+        export_rf_analysis(
+            tracks_classified=tracks_classified,
+            output_dir=folders['main'],
+            label_names=label_names,
+            dt=dt,
+            progress_callback=progress_callback
+        )
+
+        if progress_callback:
+            progress_callback("=" * 70)
+            progress_callback("RF CLASSIFICATION COMPLETE!")
+            progress_callback("  07_RF_Model_Classification/ (SVG plots by diffusion type)")
+            progress_callback("  08_RF_Analysis/ (Excel, CSV, boxplots)")
+
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"Error in RF classification workflow: {e}")
+            import traceback
+            progress_callback(traceback.format_exc())
+
+
 class TrackingGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -576,6 +684,7 @@ class TrackingGUI:
         self.min_length = tk.IntVar(value=10)
         self.n_tracks_option = tk.StringVar(value="10")
         self.integration_time = tk.DoubleVar(value=100)
+        self.use_rf_classification = tk.BooleanVar(value=RF_AVAILABLE)
 
         # Batch selection state
         self.batch_dirs: list[Path] = []
@@ -706,7 +815,17 @@ class TrackingGUI:
 
         ttk.Label(main, text="Schritt 3: Export", font=('Arial', 12, 'bold')).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(10, 5))
         row += 1
-        self.export_btn = ttk.Button(main, text="Alles exportieren (SVG + Excel)", command=self.export_all, state=tk.DISABLED)
+
+        # RF Classification checkbox
+        if RF_AVAILABLE:
+            rf_check = ttk.Checkbutton(main, text="RF Diffusion Classification aktivieren (empfohlen)", variable=self.use_rf_classification)
+            rf_check.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+        else:
+            ttk.Label(main, text="RF Classification nicht verfügbar (rf_analysis.py fehlt)", foreground='#888', font=('Arial', 9)).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+
+        self.export_btn = ttk.Button(main, text="Alles exportieren (SVG + Excel + RF)", command=self.export_all, state=tk.DISABLED)
         self.export_btn.grid(row=row, column=0, columnspan=2, pady=10)
         row += 1
         # Batch start button
@@ -848,7 +967,8 @@ class TrackingGUI:
             try:
                 self.log("=" * 70)
                 self.log("START EXPORT")
-                folders = create_output_structure(self.output_dir.get())
+                use_rf = bool(self.use_rf_classification.get())
+                folders = create_output_structure(self.output_dir.get(), include_rf=use_rf)
                 self.log(f"Ordner: {folders['main']}")
                 n_opt = self.n_tracks_option.get()
                 n_tracks = 'all' if n_opt == 'all' else int(n_opt)
@@ -864,6 +984,17 @@ class TrackingGUI:
                 export_interactive_tracks(self.tracks, folders['interactive'], n_longest=5, integration_time_ms=self.integration_time.get(), progress_callback=self.log)
                 excel_path = folders['excel'] / 'all_trajectories.xlsx'
                 export_to_excel(self.tracks, excel_path, progress_callback=self.log)
+
+                # RF Classification if enabled
+                if use_rf:
+                    export_rf_classification_workflow(
+                        tracks=self.tracks,
+                        base_dir=Path(self.output_dir.get()),
+                        n_tracks_to_plot=n_tracks,
+                        integration_time_ms=self.integration_time.get(),
+                        progress_callback=self.log
+                    )
+
                 self.log("=" * 70)
                 self.log("EXPORT ABGESCHLOSSEN!")
                 self.log(f"Ausgabe: {folders['main']}")
@@ -873,12 +1004,17 @@ class TrackingGUI:
                 self.log("  04_Tracks/ (Excel)")
                 self.log("  05_Histogramm/ (SVG)")
                 self.log("  06_Interactive/ (HTML)")
+                if use_rf:
+                    self.log("  07_RF_Model_Classification/ (SVG - diffusion type plots)")
+                    self.log("  08_RF_Analysis/ (Excel, CSV, boxplots)")
                 self.log(f"Integration Time: {self.integration_time.get()} ms")
                 folder_path = str(folders['main'])
                 self.root.after(0, lambda: messagebox.showinfo("Success", f"Export complete!\n\nFolder: {folder_path}"))
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Error", f"Export error:\n{e}"))
                 self.log(f"Error: {e}")
+                import traceback
+                self.log(traceback.format_exc())
 
         self.export_btn.config(state=tk.DISABLED)
         thread = threading.Thread(target=export_thread, daemon=True)
@@ -976,7 +1112,8 @@ class TrackingGUI:
                             continue
                         self.log(f"    Ergebnis: Tracks={stats['n_tracks']}, Locs={stats['n_localizations']:,}, Längen {stats['min_length']}-{stats['max_length']} (avg {stats['mean_length']:.1f})")
                         # Export into this folder
-                        folders = create_output_structure(folder)
+                        use_rf = bool(self.use_rf_classification.get())
+                        folders = create_output_structure(folder, include_rf=use_rf)
                         n_opt = self.n_tracks_option.get()
                         n_tracks = 'all' if n_opt == 'all' else int(n_opt)
                         export_all_visualizations(
@@ -991,6 +1128,17 @@ class TrackingGUI:
                         export_interactive_tracks(tracks, folders['interactive'], n_longest=5, integration_time_ms=self.integration_time.get(), progress_callback=self.log)
                         excel_path = folders['excel'] / 'all_trajectories.xlsx'
                         export_to_excel(tracks, excel_path, progress_callback=self.log)
+
+                        # RF Classification if enabled
+                        if use_rf:
+                            export_rf_classification_workflow(
+                                tracks=tracks,
+                                base_dir=folder,
+                                n_tracks_to_plot=n_tracks,
+                                integration_time_ms=self.integration_time.get(),
+                                progress_callback=self.log
+                            )
+
                         self.log(f"    Export OK → {folders['main']}")
                     except Exception as e:
                         self.log(f"    Fehler in Ordner {folder}: {e}")
