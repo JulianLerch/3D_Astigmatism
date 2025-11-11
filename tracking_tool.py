@@ -34,6 +34,13 @@ try:
 except ImportError:
     RF_AVAILABLE = False
 
+# Time Series Analysis module
+try:
+    from time_series_analysis import export_time_series_analysis
+    TIMESERIES_AVAILABLE = True
+except ImportError:
+    TIMESERIES_AVAILABLE = False
+
 # Core: I/O + preprocessing
 def calculate_snr(df: pd.DataFrame) -> pd.Series:
     if not {'intensity [photon]', 'offset [photon]', 'bkgstd [photon]'}.issubset(df.columns):
@@ -686,8 +693,8 @@ class TrackingGUI:
         self.integration_time = tk.DoubleVar(value=100)
         self.use_rf_classification = tk.BooleanVar(value=RF_AVAILABLE)
 
-        # Batch selection state
-        self.batch_dirs: list[Path] = []
+        # Batch selection state (folder, polymerization_time)
+        self.batch_dirs: list[tuple[Path, float]] = []
 
         # Refractive indices (GUI input)
         self.n_oil = tk.DoubleVar(value=1.518)
@@ -832,6 +839,15 @@ class TrackingGUI:
         self.batch_btn = ttk.Button(main, text="Batch starten (Track + Export für Ordnerliste)", command=self.run_batch)
         self.batch_btn.grid(row=row, column=0, columnspan=2, pady=5)
         row += 1
+
+        # Time Series button
+        if TIMESERIES_AVAILABLE and RF_AVAILABLE:
+            self.timeseries_btn = ttk.Button(main, text="Time Series Analyse (benötigt RF + Poly-Zeiten)", command=self.run_time_series, state=tk.NORMAL)
+            self.timeseries_btn.grid(row=row, column=0, columnspan=2, pady=5)
+            row += 1
+        else:
+            ttk.Label(main, text="Time Series nicht verfügbar (benötigt RF + time_series_analysis.py)", foreground='#888', font=('Arial', 9)).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
 
         ttk.Separator(main, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
@@ -1025,9 +1041,50 @@ class TrackingGUI:
         dirname = filedialog.askdirectory(title="Ordner für Batch hinzufügen")
         if dirname:
             p = Path(dirname)
-            if p not in self.batch_dirs:
-                self.batch_dirs.append(p)
-                self.batch_listbox.insert(tk.END, str(p))
+
+            # Check if already added
+            if any(folder == p for folder, _ in self.batch_dirs):
+                messagebox.showwarning("Warnung", "Ordner bereits in der Liste!")
+                return
+
+            # Prompt for polymerization time
+            poly_time_dialog = tk.Toplevel(self.root)
+            poly_time_dialog.title("Polymerisationszeit eingeben")
+            poly_time_dialog.geometry("400x150")
+            poly_time_dialog.transient(self.root)
+            poly_time_dialog.grab_set()
+
+            ttk.Label(poly_time_dialog, text=f"Ordner: {p.name}", font=('Arial', 10, 'bold')).pack(pady=10)
+            ttk.Label(poly_time_dialog, text="Polymerisationszeit (beliebige Einheit):").pack(pady=5)
+
+            poly_entry = ttk.Entry(poly_time_dialog, width=20)
+            poly_entry.pack(pady=5)
+            poly_entry.insert(0, "0.0")
+            poly_entry.focus()
+
+            result = {"confirmed": False, "time": 0.0}
+
+            def on_ok():
+                try:
+                    result["time"] = float(poly_entry.get())
+                    result["confirmed"] = True
+                    poly_time_dialog.destroy()
+                except ValueError:
+                    messagebox.showerror("Fehler", "Bitte gültige Zahl eingeben!")
+
+            def on_cancel():
+                poly_time_dialog.destroy()
+
+            btn_frame = ttk.Frame(poly_time_dialog)
+            btn_frame.pack(pady=10)
+            ttk.Button(btn_frame, text="OK", command=on_ok).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="Abbrechen", command=on_cancel).pack(side=tk.LEFT, padx=5)
+
+            poly_time_dialog.wait_window()
+
+            if result["confirmed"]:
+                self.batch_dirs.append((p, result["time"]))
+                self.batch_listbox.insert(tk.END, f"{p.name}  [t={result['time']:.2f}]")
 
     def batch_remove_selected(self):
         sel = list(self.batch_listbox.curselection())
@@ -1056,10 +1113,10 @@ class TrackingGUI:
                 use_filter = bool(self.use_prefilter.get())
                 auto = bool(self.auto_mode.get())
                 # Iterate directories
-                for i, folder in enumerate(self.batch_dirs, start=1):
+                for i, (folder, poly_time) in enumerate(self.batch_dirs, start=1):
                     try:
                         self.log("-" * 40)
-                        self.log(f"[{i}/{len(self.batch_dirs)}] Ordner: {folder}")
+                        self.log(f"[{i}/{len(self.batch_dirs)}] Ordner: {folder} [Polyzeit: {poly_time:.2f}]")
                         csv_path = find_valid_csv_in_directory(folder)
                         if not csv_path:
                             self.log("  Keine geeignete CSV gefunden (erwartet Spalten: x [nm], y [nm], frame)")
@@ -1149,6 +1206,62 @@ class TrackingGUI:
                 messagebox.showerror("Batch-Fehler", f"Fehler in Batch-Verarbeitung:\n{e}")
         # run in background
         thread = threading.Thread(target=batch_thread, daemon=True)
+        thread.start()
+
+    def run_time_series(self):
+        """Run time series analysis on batch folders."""
+        def timeseries_thread():
+            try:
+                if not self.batch_dirs:
+                    messagebox.showerror("Fehler", "Bitte zuerst Ordner zur Batchliste hinzufügen!")
+                    return
+
+                if not TIMESERIES_AVAILABLE:
+                    messagebox.showerror("Fehler", "Time Series Analyse nicht verfügbar (time_series_analysis.py fehlt)")
+                    return
+
+                if not RF_AVAILABLE:
+                    messagebox.showerror("Fehler", "Time Series Analyse benötigt RF Classification!")
+                    return
+
+                # Check if all folders have RF results
+                missing_rf = []
+                for folder, poly_time in self.batch_dirs:
+                    rf_dir = folder / '3D_Tracking_Results' / '08_RF_Analysis'
+                    if not (rf_dir / 'track_summary.csv').exists():
+                        missing_rf.append(folder.name)
+
+                if missing_rf:
+                    msg = "Folgende Ordner haben keine RF-Analyse:\n\n" + "\n".join(missing_rf) + "\n\nBitte zuerst Batch mit RF-Classification durchführen!"
+                    messagebox.showerror("Fehler", msg)
+                    return
+
+                # Ask for output directory
+                self.log("=" * 70)
+                self.log("TIME SERIES ANALYSE")
+                self.log(f"Analysiere {len(self.batch_dirs)} Zeitpunkte...")
+
+                output_dir = Path(self.output_dir.get())
+
+                # Run analysis
+                export_time_series_analysis(
+                    folders_with_times=self.batch_dirs,
+                    output_dir=output_dir,
+                    progress_callback=self.log
+                )
+
+                self.log("=" * 70)
+                self.log("TIME SERIES ANALYSE ABGESCHLOSSEN!")
+                ts_path = output_dir / 'timeSeries'
+                self.root.after(0, lambda: messagebox.showinfo("Erfolg", f"Time Series Analyse abgeschlossen!\n\nOrdner: {ts_path}"))
+
+            except Exception as e:
+                self.log(f"FEHLER: {e}")
+                import traceback
+                self.log(traceback.format_exc())
+                messagebox.showerror("Fehler", f"Time Series Analyse fehlgeschlagen:\n{e}")
+
+        thread = threading.Thread(target=timeseries_thread, daemon=True)
         thread.start()
 
     def on_closing(self):
