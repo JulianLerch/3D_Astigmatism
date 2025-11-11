@@ -41,6 +41,13 @@ try:
 except ImportError:
     TIMESERIES_AVAILABLE = False
 
+# Clustering Analysis module
+try:
+    from clustering_analysis import perform_clustering_workflow
+    CLUSTERING_AVAILABLE = True
+except ImportError:
+    CLUSTERING_AVAILABLE = False
+
 # Core: I/O + preprocessing
 def calculate_snr(df: pd.DataFrame) -> pd.Series:
     if not {'intensity [photon]', 'offset [photon]', 'bkgstd [photon]'}.issubset(df.columns):
@@ -337,7 +344,7 @@ def scan_parameters_and_select(df_track: pd.DataFrame, min_track_length: int, pr
 
 
 # Output helpers: folders, plotting, excel
-def create_output_structure(base_path: str | Path, include_rf: bool = False) -> dict[str, Path]:
+def create_output_structure(base_path: str | Path, include_rf: bool = False, include_clustering: bool = False) -> dict[str, Path]:
     base_path = Path(base_path)
     folders = {
         'main': base_path / '3D_Tracking_Results',
@@ -352,6 +359,10 @@ def create_output_structure(base_path: str | Path, include_rf: bool = False) -> 
     if include_rf:
         folders['rf_class'] = base_path / '3D_Tracking_Results' / '07_RF_Model_Classification'
         folders['rf_analysis'] = base_path / '3D_Tracking_Results' / '08_RF_Analysis'
+
+    if include_clustering:
+        folders['cluster_class'] = base_path / '3D_Tracking_Results' / '09_Clustering_Classification'
+        folders['cluster_analysis'] = base_path / '3D_Tracking_Results' / '10_Clustering_Analysis'
 
     for folder in folders.values():
         folder.mkdir(parents=True, exist_ok=True)
@@ -692,6 +703,8 @@ class TrackingGUI:
         self.n_tracks_option = tk.StringVar(value="10")
         self.integration_time = tk.DoubleVar(value=100)
         self.use_rf_classification = tk.BooleanVar(value=RF_AVAILABLE)
+        self.use_clustering = tk.BooleanVar(value=CLUSTERING_AVAILABLE)
+        self.clustering_method = tk.StringVar(value="kmeans")
 
         # Batch selection state (folder, polymerization_time)
         self.batch_dirs: list[tuple[Path, float]] = []
@@ -832,7 +845,24 @@ class TrackingGUI:
             ttk.Label(main, text="RF Classification nicht verfügbar (rf_analysis.py fehlt)", foreground='#888', font=('Arial', 9)).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
             row += 1
 
-        self.export_btn = ttk.Button(main, text="Alles exportieren (SVG + Excel + RF)", command=self.export_all, state=tk.DISABLED)
+        # Clustering checkbox
+        if CLUSTERING_AVAILABLE:
+            cluster_check = ttk.Checkbutton(main, text="Clustering Analyse aktivieren", variable=self.use_clustering)
+            cluster_check.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+            # Clustering method selection
+            cluster_method_frame = ttk.Frame(main)
+            cluster_method_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2, padx=(20, 0))
+            ttk.Label(cluster_method_frame, text="Clustering Methode:").pack(side=tk.LEFT)
+            ttk.Radiobutton(cluster_method_frame, text="K-Means", variable=self.clustering_method, value="kmeans").pack(side=tk.LEFT, padx=5)
+            ttk.Radiobutton(cluster_method_frame, text="Hierarchical", variable=self.clustering_method, value="hierarchical").pack(side=tk.LEFT, padx=5)
+            ttk.Radiobutton(cluster_method_frame, text="DBSCAN", variable=self.clustering_method, value="dbscan").pack(side=tk.LEFT, padx=5)
+            row += 1
+        else:
+            ttk.Label(main, text="Clustering nicht verfügbar (clustering_analysis.py fehlt)", foreground='#888', font=('Arial', 9)).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+
+        self.export_btn = ttk.Button(main, text="Alles exportieren (SVG + Excel + RF + Clustering)", command=self.export_all, state=tk.DISABLED)
         self.export_btn.grid(row=row, column=0, columnspan=2, pady=10)
         row += 1
         # Batch start button
@@ -984,7 +1014,8 @@ class TrackingGUI:
                 self.log("=" * 70)
                 self.log("START EXPORT")
                 use_rf = bool(self.use_rf_classification.get())
-                folders = create_output_structure(self.output_dir.get(), include_rf=use_rf)
+                use_clustering = bool(self.use_clustering.get())
+                folders = create_output_structure(self.output_dir.get(), include_rf=use_rf, include_clustering=use_clustering)
                 self.log(f"Ordner: {folders['main']}")
                 n_opt = self.n_tracks_option.get()
                 n_tracks = 'all' if n_opt == 'all' else int(n_opt)
@@ -1011,6 +1042,19 @@ class TrackingGUI:
                         progress_callback=self.log
                     )
 
+                # Clustering if enabled
+                if use_clustering:
+                    dt = self.integration_time.get() / 1000.0
+                    perform_clustering_workflow(
+                        tracks=self.tracks,
+                        output_dir=Path(self.output_dir.get()) / '3D_Tracking_Results',
+                        method=self.clustering_method.get(),
+                        n_clusters=None,  # Auto-detect
+                        n_tracks_to_plot=n_tracks,
+                        dt=dt,
+                        progress_callback=self.log
+                    )
+
                 self.log("=" * 70)
                 self.log("EXPORT ABGESCHLOSSEN!")
                 self.log(f"Ausgabe: {folders['main']}")
@@ -1023,6 +1067,9 @@ class TrackingGUI:
                 if use_rf:
                     self.log("  07_RF_Model_Classification/ (SVG - diffusion type plots)")
                     self.log("  08_RF_Analysis/ (Excel, CSV, boxplots)")
+                if use_clustering:
+                    self.log("  09_Clustering_Classification/ (SVG - cluster plots)")
+                    self.log("  10_Clustering_Analysis/ (Excel, CSV, PCA, boxplots)")
                 self.log(f"Integration Time: {self.integration_time.get()} ms")
                 folder_path = str(folders['main'])
                 self.root.after(0, lambda: messagebox.showinfo("Success", f"Export complete!\n\nFolder: {folder_path}"))
@@ -1170,7 +1217,8 @@ class TrackingGUI:
                         self.log(f"    Ergebnis: Tracks={stats['n_tracks']}, Locs={stats['n_localizations']:,}, Längen {stats['min_length']}-{stats['max_length']} (avg {stats['mean_length']:.1f})")
                         # Export into this folder
                         use_rf = bool(self.use_rf_classification.get())
-                        folders = create_output_structure(folder, include_rf=use_rf)
+                        use_clustering = bool(self.use_clustering.get())
+                        folders = create_output_structure(folder, include_rf=use_rf, include_clustering=use_clustering)
                         n_opt = self.n_tracks_option.get()
                         n_tracks = 'all' if n_opt == 'all' else int(n_opt)
                         export_all_visualizations(
@@ -1193,6 +1241,19 @@ class TrackingGUI:
                                 base_dir=folder,
                                 n_tracks_to_plot=n_tracks,
                                 integration_time_ms=self.integration_time.get(),
+                                progress_callback=self.log
+                            )
+
+                        # Clustering if enabled
+                        if use_clustering:
+                            dt = self.integration_time.get() / 1000.0
+                            perform_clustering_workflow(
+                                tracks=tracks,
+                                output_dir=folder / '3D_Tracking_Results',
+                                method=self.clustering_method.get(),
+                                n_clusters=None,
+                                n_tracks_to_plot=n_tracks,
+                                dt=dt,
                                 progress_callback=self.log
                             )
 

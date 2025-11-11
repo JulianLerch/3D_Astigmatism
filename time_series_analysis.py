@@ -40,6 +40,30 @@ def load_rf_results_from_folder(folder: Path) -> Optional[pd.DataFrame]:
         return None
 
 
+def load_clustering_results_from_folder(folder: Path) -> Optional[pd.DataFrame]:
+    """
+    Load clustering analysis results from a folder.
+
+    Args:
+        folder: Path to folder containing 3D_Tracking_Results/10_Clustering_Analysis/
+
+    Returns:
+        DataFrame with clustering results or None if not found
+    """
+    cluster_analysis_dir = folder / '3D_Tracking_Results' / '10_Clustering_Analysis'
+    summary_file = cluster_analysis_dir / 'track_features_clusters.csv'
+
+    if not summary_file.exists():
+        return None
+
+    try:
+        df = pd.read_csv(summary_file)
+        return df
+    except Exception as e:
+        print(f"Error loading {summary_file}: {e}")
+        return None
+
+
 def aggregate_time_series_data(folders_with_times: List[Tuple[Path, float]],
                                 progress_callback=None) -> pd.DataFrame:
     """
@@ -485,6 +509,175 @@ def plot_overall_time_trends(stats_df: pd.DataFrame, save_path: Path):
     plt.close(fig)
 
 
+def export_clustering_time_series(folders_with_times: List[Tuple[Path, float]],
+                                 ts_dir: Path, progress_callback=None):
+    """
+    Export clustering time series analysis.
+
+    Args:
+        folders_with_times: List of (folder_path, polymerization_time) tuples
+        ts_dir: Time series output directory
+        progress_callback: Optional progress callback
+    """
+    # Load clustering data
+    all_cluster_data = []
+
+    for folder, poly_time in folders_with_times:
+        df = load_clustering_results_from_folder(folder)
+
+        if df is None:
+            continue
+
+        df['polymerization_time'] = poly_time
+        df['folder'] = str(folder.name)
+
+        all_cluster_data.append(df)
+
+    if not all_cluster_data:
+        if progress_callback:
+            progress_callback("  No clustering data found - skipping")
+        return
+
+    combined_cluster_df = pd.concat(all_cluster_data, ignore_index=True)
+
+    # Statistics per time point
+    cluster_stats = []
+
+    time_points = sorted(combined_cluster_df['polymerization_time'].unique())
+
+    for t in time_points:
+        t_data = combined_cluster_df[combined_cluster_df['polymerization_time'] == t]
+
+        # Overall stats
+        stat = {
+            'time': float(t),
+            'n_tracks': len(t_data),
+            'n_clusters': int(t_data['cluster'].nunique()),
+            'mean_alpha': float(t_data['alpha_msd'].mean()),
+            'std_alpha': float(t_data['alpha_msd'].std()),
+            'mean_D': float(t_data['D'].mean()),
+            'std_D': float(t_data['D'].std()),
+        }
+
+        # Per-cluster stats
+        for cluster in sorted(t_data['cluster'].unique()):
+            if cluster == -1:  # Skip noise
+                continue
+
+            cluster_data = t_data[t_data['cluster'] == cluster]
+
+            stat[f'n_tracks_cluster_{cluster}'] = len(cluster_data)
+            stat[f'fraction_cluster_{cluster}'] = len(cluster_data) / len(t_data)
+            stat[f'mean_alpha_cluster_{cluster}'] = float(cluster_data['alpha_msd'].mean())
+            stat[f'mean_D_cluster_{cluster}'] = float(cluster_data['D'].mean())
+
+        cluster_stats.append(stat)
+
+    cluster_stats_df = pd.DataFrame(cluster_stats)
+
+    # Export CSV
+    cluster_stats_df.to_csv(ts_dir / 'time_series_clustering_statistics.csv', index=False)
+    combined_cluster_df.to_csv(ts_dir / 'time_series_all_tracks_clustering.csv', index=False)
+
+    if progress_callback:
+        progress_callback("  Saved clustering time series CSVs")
+
+    # Create plots
+    # 1. Cluster distribution heatmap over time
+    try:
+        from clustering_analysis import create_cluster_colormap
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        clusters_all = sorted([c for c in combined_cluster_df['cluster'].unique() if c != -1])
+        times = cluster_stats_df['time'].values
+
+        matrix = np.zeros((len(clusters_all), len(times)))
+
+        for i, cluster in enumerate(clusters_all):
+            for j, t in enumerate(times):
+                t_data = combined_cluster_df[combined_cluster_df['polymerization_time'] == t]
+                count = len(t_data[t_data['cluster'] == cluster])
+                matrix[i, j] = count
+
+        # Normalize to fractions
+        totals = matrix.sum(axis=0)
+        matrix_norm = matrix / (totals + 1e-10) * 100
+
+        im = ax.imshow(matrix_norm, cmap='YlGnBu', aspect='auto', interpolation='nearest')
+
+        ax.set_xticks(np.arange(len(times)))
+        ax.set_yticks(np.arange(len(clusters_all)))
+
+        ax.set_xticklabels([f'{t:.1f}' for t in times])
+        ax.set_yticklabels([f'Cluster {c}' for c in clusters_all])
+
+        ax.set_xlabel('Polymerization Time', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Cluster', fontsize=12, fontweight='bold')
+        ax.set_title('Cluster Distribution Heatmap Over Time (%)', fontsize=14, fontweight='bold')
+
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Fraction (%)', fontsize=11)
+
+        # Annotate
+        for i in range(len(clusters_all)):
+            for j in range(len(times)):
+                if matrix_norm[i, j] > 0.1:  # Only annotate non-negligible values
+                    text = ax.text(j, i, f'{matrix_norm[i, j]:.1f}',
+                                   ha="center", va="center",
+                                   color="black" if matrix_norm[i, j] < 50 else "white",
+                                   fontsize=8, fontweight='bold')
+
+        plt.tight_layout()
+        plt.savefig(ts_dir / 'clustering_heatmap_over_time.svg', format='svg', bbox_inches='tight', dpi=300)
+        plt.close(fig)
+
+        if progress_callback:
+            progress_callback("  Created: clustering_heatmap_over_time.svg")
+
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"  Warning: Could not create clustering heatmap: {e}")
+
+    # 2. Cluster count evolution (stacked area)
+    try:
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        color_map = create_cluster_colormap(max(clusters_all) + 1)
+
+        bottom = np.zeros(len(times))
+        for cluster in sorted(clusters_all):
+            counts = []
+            for t in times:
+                t_data = combined_cluster_df[combined_cluster_df['polymerization_time'] == t]
+                count = len(t_data[t_data['cluster'] == cluster])
+                counts.append(count)
+
+            counts = np.array(counts)
+            color = color_map.get(cluster, '#888888')
+
+            ax.fill_between(times, bottom, bottom + counts,
+                             label=f'Cluster {cluster}', color=color, alpha=0.7)
+            bottom += counts
+
+        ax.set_xlabel('Polymerization Time', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Number of Tracks', fontsize=12, fontweight='bold')
+        ax.set_title('Track Count Evolution by Cluster', fontsize=14, fontweight='bold')
+        ax.legend(loc='upper left', framealpha=0.9)
+        ax.grid(axis='y', alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(ts_dir / 'cluster_counts_over_time.svg', format='svg', bbox_inches='tight', dpi=300)
+        plt.close(fig)
+
+        if progress_callback:
+            progress_callback("  Created: cluster_counts_over_time.svg")
+
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"  Warning: Could not create cluster count plot: {e}")
+
+
 def export_time_series_analysis(folders_with_times: List[Tuple[Path, float]],
                                 output_dir: Path,
                                 progress_callback=None):
@@ -567,9 +760,22 @@ def export_time_series_analysis(folders_with_times: List[Tuple[Path, float]],
     if progress_callback:
         progress_callback("  Created: overall_trends.svg")
 
+    # Check if clustering data is also available
+    cluster_available = all(
+        (folder / '3D_Tracking_Results' / '10_Clustering_Analysis' / 'track_features_clusters.csv').exists()
+        for folder, _ in folders_with_times
+    )
+
+    if cluster_available and progress_callback:
+        progress_callback("Clustering data detected - creating clustering time series...")
+
+        export_clustering_time_series(folders_with_times, ts_dir, progress_callback)
+
     if progress_callback:
         progress_callback("=" * 70)
         progress_callback("TIME SERIES ANALYSIS COMPLETE!")
         progress_callback(f"Output directory: {ts_dir}")
         progress_callback(f"Time points analyzed: {len(folders_with_times)}")
         progress_callback(f"Total tracks: {len(combined_df)}")
+        if cluster_available:
+            progress_callback("Clustering time series included!")
