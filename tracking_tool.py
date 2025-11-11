@@ -34,6 +34,20 @@ try:
 except ImportError:
     RF_AVAILABLE = False
 
+# Time Series Analysis module
+try:
+    from time_series_analysis import export_time_series_analysis
+    TIMESERIES_AVAILABLE = True
+except ImportError:
+    TIMESERIES_AVAILABLE = False
+
+# Clustering Analysis module
+try:
+    from clustering_analysis import perform_clustering_workflow
+    CLUSTERING_AVAILABLE = True
+except ImportError:
+    CLUSTERING_AVAILABLE = False
+
 # Core: I/O + preprocessing
 def calculate_snr(df: pd.DataFrame) -> pd.Series:
     if not {'intensity [photon]', 'offset [photon]', 'bkgstd [photon]'}.issubset(df.columns):
@@ -330,7 +344,7 @@ def scan_parameters_and_select(df_track: pd.DataFrame, min_track_length: int, pr
 
 
 # Output helpers: folders, plotting, excel
-def create_output_structure(base_path: str | Path, include_rf: bool = False) -> dict[str, Path]:
+def create_output_structure(base_path: str | Path, include_rf: bool = False, include_clustering: bool = False) -> dict[str, Path]:
     base_path = Path(base_path)
     folders = {
         'main': base_path / '3D_Tracking_Results',
@@ -345,6 +359,10 @@ def create_output_structure(base_path: str | Path, include_rf: bool = False) -> 
     if include_rf:
         folders['rf_class'] = base_path / '3D_Tracking_Results' / '07_RF_Model_Classification'
         folders['rf_analysis'] = base_path / '3D_Tracking_Results' / '08_RF_Analysis'
+
+    if include_clustering:
+        folders['cluster_class'] = base_path / '3D_Tracking_Results' / '09_Clustering_Classification'
+        folders['cluster_analysis'] = base_path / '3D_Tracking_Results' / '10_Clustering_Analysis'
 
     for folder in folders.values():
         folder.mkdir(parents=True, exist_ok=True)
@@ -685,9 +703,11 @@ class TrackingGUI:
         self.n_tracks_option = tk.StringVar(value="10")
         self.integration_time = tk.DoubleVar(value=100)
         self.use_rf_classification = tk.BooleanVar(value=RF_AVAILABLE)
+        self.use_clustering = tk.BooleanVar(value=CLUSTERING_AVAILABLE)
+        self.clustering_method = tk.StringVar(value="kmeans")
 
-        # Batch selection state
-        self.batch_dirs: list[Path] = []
+        # Batch selection state (folder, polymerization_time)
+        self.batch_dirs: list[tuple[Path, float]] = []
 
         # Refractive indices (GUI input)
         self.n_oil = tk.DoubleVar(value=1.518)
@@ -825,13 +845,39 @@ class TrackingGUI:
             ttk.Label(main, text="RF Classification nicht verfügbar (rf_analysis.py fehlt)", foreground='#888', font=('Arial', 9)).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
             row += 1
 
-        self.export_btn = ttk.Button(main, text="Alles exportieren (SVG + Excel + RF)", command=self.export_all, state=tk.DISABLED)
+        # Clustering checkbox
+        if CLUSTERING_AVAILABLE:
+            cluster_check = ttk.Checkbutton(main, text="Clustering Analyse aktivieren", variable=self.use_clustering)
+            cluster_check.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+            # Clustering method selection
+            cluster_method_frame = ttk.Frame(main)
+            cluster_method_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2, padx=(20, 0))
+            ttk.Label(cluster_method_frame, text="Clustering Methode:").pack(side=tk.LEFT)
+            ttk.Radiobutton(cluster_method_frame, text="K-Means", variable=self.clustering_method, value="kmeans").pack(side=tk.LEFT, padx=5)
+            ttk.Radiobutton(cluster_method_frame, text="Hierarchical", variable=self.clustering_method, value="hierarchical").pack(side=tk.LEFT, padx=5)
+            ttk.Radiobutton(cluster_method_frame, text="DBSCAN", variable=self.clustering_method, value="dbscan").pack(side=tk.LEFT, padx=5)
+            row += 1
+        else:
+            ttk.Label(main, text="Clustering nicht verfügbar (clustering_analysis.py fehlt)", foreground='#888', font=('Arial', 9)).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+
+        self.export_btn = ttk.Button(main, text="Alles exportieren (SVG + Excel + RF + Clustering)", command=self.export_all, state=tk.DISABLED)
         self.export_btn.grid(row=row, column=0, columnspan=2, pady=10)
         row += 1
         # Batch start button
         self.batch_btn = ttk.Button(main, text="Batch starten (Track + Export für Ordnerliste)", command=self.run_batch)
         self.batch_btn.grid(row=row, column=0, columnspan=2, pady=5)
         row += 1
+
+        # Time Series button
+        if TIMESERIES_AVAILABLE and RF_AVAILABLE:
+            self.timeseries_btn = ttk.Button(main, text="Time Series Analyse (benötigt RF + Poly-Zeiten)", command=self.run_time_series, state=tk.NORMAL)
+            self.timeseries_btn.grid(row=row, column=0, columnspan=2, pady=5)
+            row += 1
+        else:
+            ttk.Label(main, text="Time Series nicht verfügbar (benötigt RF + time_series_analysis.py)", foreground='#888', font=('Arial', 9)).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
 
         ttk.Separator(main, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
@@ -968,7 +1014,8 @@ class TrackingGUI:
                 self.log("=" * 70)
                 self.log("START EXPORT")
                 use_rf = bool(self.use_rf_classification.get())
-                folders = create_output_structure(self.output_dir.get(), include_rf=use_rf)
+                use_clustering = bool(self.use_clustering.get())
+                folders = create_output_structure(self.output_dir.get(), include_rf=use_rf, include_clustering=use_clustering)
                 self.log(f"Ordner: {folders['main']}")
                 n_opt = self.n_tracks_option.get()
                 n_tracks = 'all' if n_opt == 'all' else int(n_opt)
@@ -995,6 +1042,19 @@ class TrackingGUI:
                         progress_callback=self.log
                     )
 
+                # Clustering if enabled
+                if use_clustering:
+                    dt = self.integration_time.get() / 1000.0
+                    perform_clustering_workflow(
+                        tracks=self.tracks,
+                        output_dir=Path(self.output_dir.get()) / '3D_Tracking_Results',
+                        method=self.clustering_method.get(),
+                        n_clusters=None,  # Auto-detect
+                        n_tracks_to_plot=n_tracks,
+                        dt=dt,
+                        progress_callback=self.log
+                    )
+
                 self.log("=" * 70)
                 self.log("EXPORT ABGESCHLOSSEN!")
                 self.log(f"Ausgabe: {folders['main']}")
@@ -1007,6 +1067,9 @@ class TrackingGUI:
                 if use_rf:
                     self.log("  07_RF_Model_Classification/ (SVG - diffusion type plots)")
                     self.log("  08_RF_Analysis/ (Excel, CSV, boxplots)")
+                if use_clustering:
+                    self.log("  09_Clustering_Classification/ (SVG - cluster plots)")
+                    self.log("  10_Clustering_Analysis/ (Excel, CSV, PCA, boxplots)")
                 self.log(f"Integration Time: {self.integration_time.get()} ms")
                 folder_path = str(folders['main'])
                 self.root.after(0, lambda: messagebox.showinfo("Success", f"Export complete!\n\nFolder: {folder_path}"))
@@ -1025,9 +1088,50 @@ class TrackingGUI:
         dirname = filedialog.askdirectory(title="Ordner für Batch hinzufügen")
         if dirname:
             p = Path(dirname)
-            if p not in self.batch_dirs:
-                self.batch_dirs.append(p)
-                self.batch_listbox.insert(tk.END, str(p))
+
+            # Check if already added
+            if any(folder == p for folder, _ in self.batch_dirs):
+                messagebox.showwarning("Warnung", "Ordner bereits in der Liste!")
+                return
+
+            # Prompt for polymerization time
+            poly_time_dialog = tk.Toplevel(self.root)
+            poly_time_dialog.title("Polymerisationszeit eingeben")
+            poly_time_dialog.geometry("400x150")
+            poly_time_dialog.transient(self.root)
+            poly_time_dialog.grab_set()
+
+            ttk.Label(poly_time_dialog, text=f"Ordner: {p.name}", font=('Arial', 10, 'bold')).pack(pady=10)
+            ttk.Label(poly_time_dialog, text="Polymerisationszeit (beliebige Einheit):").pack(pady=5)
+
+            poly_entry = ttk.Entry(poly_time_dialog, width=20)
+            poly_entry.pack(pady=5)
+            poly_entry.insert(0, "0.0")
+            poly_entry.focus()
+
+            result = {"confirmed": False, "time": 0.0}
+
+            def on_ok():
+                try:
+                    result["time"] = float(poly_entry.get())
+                    result["confirmed"] = True
+                    poly_time_dialog.destroy()
+                except ValueError:
+                    messagebox.showerror("Fehler", "Bitte gültige Zahl eingeben!")
+
+            def on_cancel():
+                poly_time_dialog.destroy()
+
+            btn_frame = ttk.Frame(poly_time_dialog)
+            btn_frame.pack(pady=10)
+            ttk.Button(btn_frame, text="OK", command=on_ok).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="Abbrechen", command=on_cancel).pack(side=tk.LEFT, padx=5)
+
+            poly_time_dialog.wait_window()
+
+            if result["confirmed"]:
+                self.batch_dirs.append((p, result["time"]))
+                self.batch_listbox.insert(tk.END, f"{p.name}  [t={result['time']:.2f}]")
 
     def batch_remove_selected(self):
         sel = list(self.batch_listbox.curselection())
@@ -1056,10 +1160,10 @@ class TrackingGUI:
                 use_filter = bool(self.use_prefilter.get())
                 auto = bool(self.auto_mode.get())
                 # Iterate directories
-                for i, folder in enumerate(self.batch_dirs, start=1):
+                for i, (folder, poly_time) in enumerate(self.batch_dirs, start=1):
                     try:
                         self.log("-" * 40)
-                        self.log(f"[{i}/{len(self.batch_dirs)}] Ordner: {folder}")
+                        self.log(f"[{i}/{len(self.batch_dirs)}] Ordner: {folder} [Polyzeit: {poly_time:.2f}]")
                         csv_path = find_valid_csv_in_directory(folder)
                         if not csv_path:
                             self.log("  Keine geeignete CSV gefunden (erwartet Spalten: x [nm], y [nm], frame)")
@@ -1113,7 +1217,8 @@ class TrackingGUI:
                         self.log(f"    Ergebnis: Tracks={stats['n_tracks']}, Locs={stats['n_localizations']:,}, Längen {stats['min_length']}-{stats['max_length']} (avg {stats['mean_length']:.1f})")
                         # Export into this folder
                         use_rf = bool(self.use_rf_classification.get())
-                        folders = create_output_structure(folder, include_rf=use_rf)
+                        use_clustering = bool(self.use_clustering.get())
+                        folders = create_output_structure(folder, include_rf=use_rf, include_clustering=use_clustering)
                         n_opt = self.n_tracks_option.get()
                         n_tracks = 'all' if n_opt == 'all' else int(n_opt)
                         export_all_visualizations(
@@ -1139,6 +1244,19 @@ class TrackingGUI:
                                 progress_callback=self.log
                             )
 
+                        # Clustering if enabled
+                        if use_clustering:
+                            dt = self.integration_time.get() / 1000.0
+                            perform_clustering_workflow(
+                                tracks=tracks,
+                                output_dir=folder / '3D_Tracking_Results',
+                                method=self.clustering_method.get(),
+                                n_clusters=None,
+                                n_tracks_to_plot=n_tracks,
+                                dt=dt,
+                                progress_callback=self.log
+                            )
+
                         self.log(f"    Export OK → {folders['main']}")
                     except Exception as e:
                         self.log(f"    Fehler in Ordner {folder}: {e}")
@@ -1149,6 +1267,62 @@ class TrackingGUI:
                 messagebox.showerror("Batch-Fehler", f"Fehler in Batch-Verarbeitung:\n{e}")
         # run in background
         thread = threading.Thread(target=batch_thread, daemon=True)
+        thread.start()
+
+    def run_time_series(self):
+        """Run time series analysis on batch folders."""
+        def timeseries_thread():
+            try:
+                if not self.batch_dirs:
+                    messagebox.showerror("Fehler", "Bitte zuerst Ordner zur Batchliste hinzufügen!")
+                    return
+
+                if not TIMESERIES_AVAILABLE:
+                    messagebox.showerror("Fehler", "Time Series Analyse nicht verfügbar (time_series_analysis.py fehlt)")
+                    return
+
+                if not RF_AVAILABLE:
+                    messagebox.showerror("Fehler", "Time Series Analyse benötigt RF Classification!")
+                    return
+
+                # Check if all folders have RF results
+                missing_rf = []
+                for folder, poly_time in self.batch_dirs:
+                    rf_dir = folder / '3D_Tracking_Results' / '08_RF_Analysis'
+                    if not (rf_dir / 'track_summary.csv').exists():
+                        missing_rf.append(folder.name)
+
+                if missing_rf:
+                    msg = "Folgende Ordner haben keine RF-Analyse:\n\n" + "\n".join(missing_rf) + "\n\nBitte zuerst Batch mit RF-Classification durchführen!"
+                    messagebox.showerror("Fehler", msg)
+                    return
+
+                # Ask for output directory
+                self.log("=" * 70)
+                self.log("TIME SERIES ANALYSE")
+                self.log(f"Analysiere {len(self.batch_dirs)} Zeitpunkte...")
+
+                output_dir = Path(self.output_dir.get())
+
+                # Run analysis
+                export_time_series_analysis(
+                    folders_with_times=self.batch_dirs,
+                    output_dir=output_dir,
+                    progress_callback=self.log
+                )
+
+                self.log("=" * 70)
+                self.log("TIME SERIES ANALYSE ABGESCHLOSSEN!")
+                ts_path = output_dir / 'timeSeries'
+                self.root.after(0, lambda: messagebox.showinfo("Erfolg", f"Time Series Analyse abgeschlossen!\n\nOrdner: {ts_path}"))
+
+            except Exception as e:
+                self.log(f"FEHLER: {e}")
+                import traceback
+                self.log(traceback.format_exc())
+                messagebox.showerror("Fehler", f"Time Series Analyse fehlgeschlagen:\n{e}")
+
+        thread = threading.Thread(target=timeseries_thread, daemon=True)
         thread.start()
 
     def on_closing(self):
