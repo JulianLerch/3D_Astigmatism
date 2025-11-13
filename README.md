@@ -107,11 +107,37 @@ timeSeries/
 ├── time_series_all_tracks.csv              # Combined track data
 ├── time_series_analysis.xlsx               # Excel export
 ├── track_counts_over_time.svg              # Track count evolution
-├── diffusion_fractions_over_time.svg       # **Diffusion type distribution over time**
+├── diffusion_fractions_over_time.svg       # Legacy diffusion distribution
+├── diffusion_fractions_area.svg            # **Stacked area chart** (NEW)
 ├── alpha_evolution.svg                     # Alpha exponent evolution
 ├── D_evolution.svg                         # Diffusion coefficient evolution
 ├── diffusion_heatmap.svg                   # Heatmap of diffusion types
-└── overall_trends.svg                      # Summary trend plot
+├── overall_trends.svg                      # Summary trend plot
+├── z_distribution_violin.svg               # **z-position violin plot** (NEW)
+├── z_distribution_heatmap.svg              # **z-position heatmap** (NEW)
+├── D_boxplots/                             # **Boxplots per diffusion type** (NEW)
+│   ├── D_boxplot_normal.svg
+│   ├── D_boxplot_subdiffusion.svg
+│   ├── D_boxplot_confined.svg
+│   └── D_boxplot_superdiffusion.svg
+├── D_plots/                                # **Log/linear D plots** (NEW)
+│   ├── D_linear_normal.svg
+│   ├── D_log_normal.svg
+│   ├── D_linear_subdiffusion.svg
+│   ├── D_log_subdiffusion.svg
+│   ├── D_linear_confined.svg
+│   ├── D_log_confined.svg
+│   ├── D_linear_superdiffusion.svg
+│   └── D_log_superdiffusion.svg
+└── alpha_plots/                            # **Log/linear alpha plots** (NEW)
+    ├── alpha_linear_normal.svg
+    ├── alpha_log_normal.svg
+    ├── alpha_linear_subdiffusion.svg
+    ├── alpha_log_subdiffusion.svg
+    ├── alpha_linear_confined.svg
+    ├── alpha_log_confined.svg
+    ├── alpha_linear_superdiffusion.svg
+    └── alpha_log_superdiffusion.svg
 ```
 
 ---
@@ -135,6 +161,27 @@ pytest tests/test_z_correction.py -v
 - ✅ `test_z_correction.py`: Validates z-axis refractive index correction
 - ✅ `test_tracking.py`: Validates 3D tracking and SNR calculation
 - ✅ `test_time_series.py`: Validates time series folder creation and plots
+- ✅ `test_plot_formatting.py`: Validates plot formatting and new plot functions
+
+---
+
+## 📊 Plot Formatting
+
+All plots follow publication-ready formatting standards:
+
+**Style Guidelines:**
+- ✅ **No grid lines** - Clean, uncluttered visualizations
+- ✅ **No titles** - Captions should be in figure legends/text
+- ✅ **SVG vector format** - Scalable, high-quality output
+- ✅ **Concise English legends** - Short, descriptive labels
+- ✅ **Minimalist spines** - Only left and bottom axes visible
+- ✅ **Consistent colors** - Blue (Normal), Orange (Subdiffusion), Green (Confined), Red (Superdiffusion)
+
+**New Advanced Plots:**
+- **Stacked Area Chart**: Shows diffusion type distribution evolution (fills between lines)
+- **Boxplots**: Distribution of D coefficient at each time point, per diffusion type
+- **Log/Linear Plots**: Both log and linear scale for D and alpha, enabling detection of trends across orders of magnitude
+- **z-Distribution Analysis**: Violin plots and heatmaps showing spatial distribution evolution
 
 ---
 
