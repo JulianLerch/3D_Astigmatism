@@ -13,7 +13,16 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 import warnings
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+try:
+    from logger import get_logger
+    logger = get_logger(__name__)
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
 
 # Import feature extractor from rf_analysis
 try:

@@ -13,7 +13,31 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 import warnings
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+try:
+    from logger import get_logger
+    logger = get_logger(__name__)
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+# Import new plotting functions
+try:
+    from time_series_plots import (
+        plot_diffusion_fractions_area,
+        plot_D_boxplots_per_diffusion_type,
+        plot_D_log_linear_per_diffusion_type,
+        plot_alpha_log_linear_per_diffusion_type,
+        plot_z_distribution_over_time,
+        plot_z_distribution_heatmap
+    )
+    ADVANCED_PLOTS_AVAILABLE = True
+except ImportError:
+    ADVANCED_PLOTS_AVAILABLE = False
+    logger.warning("Advanced plotting functions not available")
 
 
 def load_rf_results_from_folder(folder: Path) -> Optional[pd.DataFrame]:
@@ -62,6 +86,35 @@ def load_clustering_results_from_folder(folder: Path) -> Optional[pd.DataFrame]:
     except Exception as e:
         print(f"Error loading {summary_file}: {e}")
         return None
+
+
+def load_tracks_from_folder(folder: Path) -> Optional[pd.DataFrame]:
+    """
+    Load tracked particles data from a folder (for z-position analysis).
+
+    Args:
+        folder: Path to folder containing tracking results
+
+    Returns:
+        DataFrame with tracks or None if not found
+    """
+    # Try multiple possible locations
+    possible_paths = [
+        folder / '3D_Tracking_Results' / '04_Tracks' / 'all_trajectories.csv',
+        folder / '3D_Tracking_Results' / 'tracks.csv',
+        folder / 'tracks.csv'
+    ]
+
+    for track_path in possible_paths:
+        if track_path.exists():
+            try:
+                df = pd.read_csv(track_path)
+                return df
+            except Exception as e:
+                logger.warning(f"Error loading {track_path}: {e}")
+                continue
+
+    return None
 
 
 def aggregate_time_series_data(folders_with_times: List[Tuple[Path, float]],
@@ -760,6 +813,46 @@ def export_time_series_analysis(folders_with_times: List[Tuple[Path, float]],
     if progress_callback:
         progress_callback("  Created: overall_trends.svg")
 
+    # Create advanced plots if available
+    if ADVANCED_PLOTS_AVAILABLE:
+        if progress_callback:
+            progress_callback("Creating advanced plots...")
+
+        # Stacked area chart for diffusion fractions
+        plot_diffusion_fractions_area(combined_df, ts_dir / 'diffusion_fractions_area.svg', progress_callback)
+
+        # Boxplots for D per diffusion type
+        d_boxplot_dir = ts_dir / 'D_boxplots'
+        plot_D_boxplots_per_diffusion_type(combined_df, d_boxplot_dir, progress_callback)
+
+        # Log/linear plots for D
+        d_plots_dir = ts_dir / 'D_plots'
+        plot_D_log_linear_per_diffusion_type(combined_df, d_plots_dir, progress_callback)
+
+        # Log/linear plots for alpha
+        alpha_plots_dir = ts_dir / 'alpha_plots'
+        plot_alpha_log_linear_per_diffusion_type(combined_df, alpha_plots_dir, progress_callback)
+
+        # Load tracks for z-position analysis
+        if progress_callback:
+            progress_callback("Loading track data for z-position analysis...")
+
+        tracks_data = {}
+        for folder, poly_time in folders_with_times:
+            tracks_df = load_tracks_from_folder(folder)
+            if tracks_df is not None:
+                tracks_data[(folder, poly_time)] = tracks_df
+
+        if tracks_data:
+            # z-distribution plots
+            plot_z_distribution_over_time(combined_df, tracks_data,
+                                          ts_dir / 'z_distribution_violin.svg', progress_callback)
+            plot_z_distribution_heatmap(combined_df, tracks_data,
+                                        ts_dir / 'z_distribution_heatmap.svg', progress_callback)
+        else:
+            if progress_callback:
+                progress_callback("  Warning: No track data found for z-position analysis")
+
     # Check if clustering data is also available
     cluster_available = all(
         (folder / '3D_Tracking_Results' / '10_Clustering_Analysis' / 'track_features_clusters.csv').exists()
@@ -779,3 +872,5 @@ def export_time_series_analysis(folders_with_times: List[Tuple[Path, float]],
         progress_callback(f"Total tracks: {len(combined_df)}")
         if cluster_available:
             progress_callback("Clustering time series included!")
+        if ADVANCED_PLOTS_AVAILABLE:
+            progress_callback("Advanced plots created (area, boxplots, log/linear, z-distribution)")
